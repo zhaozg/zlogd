@@ -8,6 +8,9 @@ zig-out/
 *.db-wal
 *.db-shm
 
+# Benchmark results (generated)
+benchmark_results.json
+
 # Editor files
 *.swp
 *.swo

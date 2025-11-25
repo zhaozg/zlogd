@@ -1,5 +1,7 @@
 # zlogd
 
+[![CI](https://github.com/zhaozg/zlogd/actions/workflows/ci.yml/badge.svg)](https://github.com/zhaozg/zlogd/actions/workflows/ci.yml)
+
 A high-performance log collection and storage server implemented in Zig.
 
 ## Features
@@ -32,6 +34,31 @@ zig build
 ```bash
 zig build test
 ```
+
+### Build optimized release
+```bash
+zig build -Doptimize=ReleaseFast
+```
+
+### Run performance benchmark
+```bash
+zig build bench -Doptimize=ReleaseFast
+```
+
+## Performance Baseline
+
+Benchmark results in ReleaseFast mode (in-memory SQLite):
+
+| Operation | Ops/sec | Avg Latency | Throughput |
+|-----------|---------|-------------|------------|
+| Single Insert | ~127,000 | ~8 µs | 127K entries/sec |
+| Batch Insert x10 | ~17,500 | ~57 µs | 175K entries/sec |
+| Batch Insert x100 | ~2,100 | ~477 µs | 210K entries/sec |
+
+**Key observations:**
+- Single inserts: High ops/sec but lower total throughput
+- Batch x100: Best effective throughput at ~210K entries/second
+- Batching provides significant throughput improvements
 
 ## Usage
 
