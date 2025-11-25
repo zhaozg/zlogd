@@ -67,6 +67,7 @@ pub const LogStorage = struct {
     insert_stmt: ?sqlite.Statement = null,
     allocator: std.mem.Allocator,
     prev_hmac: [32]u8 = [_]u8{0} ** 32, // Chain HMAC state
+    next_id: i64 = 1, // Cached next expected ID for performance
 
     const SCHEMA =
         \\CREATE TABLE IF NOT EXISTS logs (
@@ -109,12 +110,14 @@ pub const LogStorage = struct {
         // Create schema
         try db.exec(SCHEMA);
 
-        // Load the last HMAC from existing records for chain continuation
+        // Load the last HMAC and next_id from existing records for chain continuation
         var prev_hmac: [32]u8 = [_]u8{0} ** 32;
-        var stmt = try db.prepare("SELECT hmac FROM logs ORDER BY id DESC LIMIT 1");
+        var next_id: i64 = 1;
+        var stmt = try db.prepare("SELECT id, hmac FROM logs ORDER BY id DESC LIMIT 1");
         defer stmt.finalize();
         if (try stmt.step()) {
-            if (stmt.columnBlob(0)) |blob| {
+            next_id = stmt.columnInt(0) + 1;
+            if (stmt.columnBlob(1)) |blob| {
                 if (blob.len == 32) {
                     @memcpy(&prev_hmac, blob);
                 }
@@ -125,6 +128,7 @@ pub const LogStorage = struct {
             .db = db,
             .allocator = allocator,
             .prev_hmac = prev_hmac,
+            .next_id = next_id,
         };
     }
 
@@ -140,6 +144,7 @@ pub const LogStorage = struct {
             .db = db,
             .allocator = allocator,
             .prev_hmac = [_]u8{0} ** 32,
+            .next_id = 1,
         };
     }
 
@@ -181,11 +186,8 @@ pub const LogStorage = struct {
     }
 
     pub fn insert(self: *LogStorage, entry: LogEntry) !i64 {
-        // Get the next expected ID (MAX(id) + 1 or 1 if table is empty)
-        var id_stmt = try self.db.prepare("SELECT COALESCE(MAX(id), 0) + 1 FROM logs");
-        defer id_stmt.finalize();
-        _ = try id_stmt.step();
-        const expected_id = id_stmt.columnInt(0);
+        // Use cached next_id for performance (no database query needed)
+        const expected_id = self.next_id;
 
         // Compute chain HMAC using the expected ID
         const hmac = self.computeChainHmac(entry.raw_data, expected_id);
@@ -246,9 +248,12 @@ pub const LogStorage = struct {
             try update_stmt.bind(2, actual_id);
             _ = try update_stmt.step();
             self.prev_hmac = correct_hmac;
+            // Reset next_id to actual_id + 1 to recover from mismatch
+            self.next_id = actual_id + 1;
         } else {
-            // Update previous HMAC for chain continuity
+            // Update previous HMAC and next_id for chain continuity
             self.prev_hmac = hmac;
+            self.next_id = expected_id + 1;
         }
 
         return actual_id;

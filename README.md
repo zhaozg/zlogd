@@ -49,16 +49,34 @@ zig build bench -Doptimize=ReleaseFast
 
 Benchmark results in ReleaseFast mode (in-memory SQLite):
 
+### Storage Operations
+
 | Operation | Ops/sec | Avg Latency | Throughput |
 |-----------|---------|-------------|------------|
-| Single Insert | ~127,000 | ~8 µs | 127K entries/sec |
-| Batch Insert x10 | ~17,500 | ~57 µs | 175K entries/sec |
-| Batch Insert x100 | ~2,100 | ~477 µs | 210K entries/sec |
+| Single Insert | ~120,000 | ~8 µs | 120K entries/sec |
+| Batch Insert x10 | ~16,600 | ~60 µs | 166K entries/sec |
+| Batch Insert x100 | ~1,980 | ~505 µs | 198K entries/sec |
+
+### Message Processing
+
+| Operation | Ops/sec | Avg Latency |
+|-----------|---------|-------------|
+| Syslog Parse | ~7,200,000 | ~0.14 µs |
+| JSON Parse | ~1,940,000 | ~0.52 µs |
+
+### Full Pipeline (Parse + Insert)
+
+| Operation | Ops/sec | Avg Latency |
+|-----------|---------|-------------|
+| Syslog Full Pipeline | ~101,000 | ~9.9 µs |
+| JSON Full Pipeline | ~100,000 | ~10.0 µs |
 
 **Key observations:**
 - Single inserts: High ops/sec but lower total throughput
-- Batch x100: Best effective throughput at ~210K entries/second
+- Batch x100: Best effective throughput at ~198K entries/second
 - Batching provides significant throughput improvements
+- Message parsing is extremely fast (~7M syslog / ~2M JSON ops/sec)
+- Full pipeline throughput limited by storage, not parsing
 
 ## Usage
 

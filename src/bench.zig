@@ -1,5 +1,5 @@
 //! Performance Benchmark for zlogd
-//! Measures throughput and latency for log insertion operations
+//! Measures throughput and latency for log insertion, syslog/JSON parsing, and full pipeline operations
 
 const std = @import("std");
 const storage = @import("storage.zig");
@@ -7,6 +7,8 @@ const LogEntry = storage.LogEntry;
 const LogLevel = storage.LogLevel;
 const LogSource = storage.LogSource;
 const writer = @import("writer.zig");
+const syslog = @import("syslog.zig");
+const rest_api = @import("rest_api.zig");
 
 const BenchmarkResult = struct {
     name: []const u8,
@@ -108,6 +110,174 @@ fn benchBatchInsert100(store: *storage.LogStorage, allocator: std.mem.Allocator)
     _ = try store.insertBatch(&entries);
 }
 
+// Syslog message samples for benchmarking
+const SYSLOG_MESSAGES = [_][]const u8{
+    "<134>Jan 15 12:34:56 server1 myapp[1234]: User login successful",
+    "<131>Feb 20 08:15:30 web-node-01 nginx[5678]: Connection timeout from 192.168.1.100",
+    "<132>Mar 10 23:45:00 db-primary mysql[9012]: Query execution time exceeded threshold",
+    "<133>Apr 05 14:22:15 app-server java[3456]: NullPointerException in UserService.java:42",
+    "<134>May 18 09:30:45 cache-01 redis[7890]: Memory usage at 85%",
+    "<135>Jun 25 16:55:20 lb-main haproxy[2345]: Backend server recovered",
+    "<130>Jul 12 11:40:10 monitor-01 prometheus[6789]: Alert: High CPU usage detected",
+    "<134>Aug 30 07:20:35 k8s-worker-01 kubelet[1234]: Pod scheduled successfully",
+};
+
+// JSON message samples for benchmarking
+const JSON_MESSAGES = [_][]const u8{
+    "{\"message\":\"User authentication successful\",\"level\":\"info\",\"host\":\"auth-server\",\"app_name\":\"auth-service\"}",
+    "{\"message\":\"Database connection established\",\"level\":\"debug\",\"host\":\"db-primary\",\"timestamp\":1700000000}",
+    "{\"message\":\"Payment processed successfully\",\"level\":\"info\",\"host\":\"payment-gw\",\"app_name\":\"payment\"}",
+    "{\"message\":\"Cache miss for key user_123\",\"level\":\"warning\",\"host\":\"cache-01\",\"app_name\":\"redis-proxy\"}",
+    "{\"message\":\"HTTP request completed\",\"level\":\"info\",\"host\":\"api-server\",\"app_name\":\"rest-api\"}",
+    "{\"message\":\"File upload completed\",\"level\":\"info\",\"host\":\"storage-01\",\"app_name\":\"file-service\"}",
+    "{\"message\":\"Email sent successfully\",\"level\":\"info\",\"host\":\"mail-server\",\"app_name\":\"mailer\"}",
+    "{\"message\":\"Background job finished\",\"level\":\"debug\",\"host\":\"worker-01\",\"app_name\":\"job-runner\"}",
+};
+
+/// Benchmark for syslog message parsing
+fn runSyslogParseBenchmark(iterations: u64) !BenchmarkResult {
+    var timer = std.time.Timer.start() catch unreachable;
+    var min_latency: u64 = std.math.maxInt(u64);
+    var max_latency: u64 = 0;
+
+    var i: u64 = 0;
+    while (i < iterations) : (i += 1) {
+        const msg_idx = i % SYSLOG_MESSAGES.len;
+        const start = timer.read();
+        const result = try syslog.parseSyslogMessage(SYSLOG_MESSAGES[msg_idx]);
+        _ = result.toLogEntry();
+        const elapsed = timer.read() - start;
+
+        if (elapsed < min_latency) min_latency = elapsed;
+        if (elapsed > max_latency) max_latency = elapsed;
+    }
+
+    const total_time = timer.read();
+    const ops_per_sec = @as(f64, @floatFromInt(iterations)) / (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+    const avg_latency_us = @as(f64, @floatFromInt(total_time)) / @as(f64, @floatFromInt(iterations)) / 1000.0;
+
+    return BenchmarkResult{
+        .name = "Syslog Parse",
+        .iterations = iterations,
+        .total_time_ns = total_time,
+        .ops_per_sec = ops_per_sec,
+        .avg_latency_us = avg_latency_us,
+        .min_latency_ns = min_latency,
+        .max_latency_ns = max_latency,
+    };
+}
+
+/// Benchmark for JSON message parsing
+fn runJsonParseBenchmark(allocator: std.mem.Allocator, iterations: u64) !BenchmarkResult {
+    var timer = std.time.Timer.start() catch unreachable;
+    var min_latency: u64 = std.math.maxInt(u64);
+    var max_latency: u64 = 0;
+
+    var i: u64 = 0;
+    while (i < iterations) : (i += 1) {
+        const msg_idx = i % JSON_MESSAGES.len;
+        const start = timer.read();
+        const result = try rest_api.parseJsonLog(allocator, JSON_MESSAGES[msg_idx]);
+        _ = result.toLogEntry();
+        const elapsed = timer.read() - start;
+
+        if (elapsed < min_latency) min_latency = elapsed;
+        if (elapsed > max_latency) max_latency = elapsed;
+    }
+
+    const total_time = timer.read();
+    const ops_per_sec = @as(f64, @floatFromInt(iterations)) / (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+    const avg_latency_us = @as(f64, @floatFromInt(total_time)) / @as(f64, @floatFromInt(iterations)) / 1000.0;
+
+    return BenchmarkResult{
+        .name = "JSON Parse",
+        .iterations = iterations,
+        .total_time_ns = total_time,
+        .ops_per_sec = ops_per_sec,
+        .avg_latency_us = avg_latency_us,
+        .min_latency_ns = min_latency,
+        .max_latency_ns = max_latency,
+    };
+}
+
+/// Benchmark for full syslog processing pipeline (parse + insert)
+fn runSyslogFullPipelineBenchmark(store: *storage.LogStorage, iterations: u64) !BenchmarkResult {
+    var timer = std.time.Timer.start() catch unreachable;
+    var min_latency: u64 = std.math.maxInt(u64);
+    var max_latency: u64 = 0;
+
+    var i: u64 = 0;
+    while (i < iterations) : (i += 1) {
+        const msg_idx = i % SYSLOG_MESSAGES.len;
+        const start = timer.read();
+
+        // Parse syslog message
+        const parsed = try syslog.parseSyslogMessage(SYSLOG_MESSAGES[msg_idx]);
+        const entry = parsed.toLogEntry();
+
+        // Insert into storage
+        _ = try store.insert(entry);
+
+        const elapsed = timer.read() - start;
+
+        if (elapsed < min_latency) min_latency = elapsed;
+        if (elapsed > max_latency) max_latency = elapsed;
+    }
+
+    const total_time = timer.read();
+    const ops_per_sec = @as(f64, @floatFromInt(iterations)) / (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+    const avg_latency_us = @as(f64, @floatFromInt(total_time)) / @as(f64, @floatFromInt(iterations)) / 1000.0;
+
+    return BenchmarkResult{
+        .name = "Syslog Full Pipeline",
+        .iterations = iterations,
+        .total_time_ns = total_time,
+        .ops_per_sec = ops_per_sec,
+        .avg_latency_us = avg_latency_us,
+        .min_latency_ns = min_latency,
+        .max_latency_ns = max_latency,
+    };
+}
+
+/// Benchmark for full JSON REST API processing pipeline (parse + insert)
+fn runJsonFullPipelineBenchmark(allocator: std.mem.Allocator, store: *storage.LogStorage, iterations: u64) !BenchmarkResult {
+    var timer = std.time.Timer.start() catch unreachable;
+    var min_latency: u64 = std.math.maxInt(u64);
+    var max_latency: u64 = 0;
+
+    var i: u64 = 0;
+    while (i < iterations) : (i += 1) {
+        const msg_idx = i % JSON_MESSAGES.len;
+        const start = timer.read();
+
+        // Parse JSON message
+        const parsed = try rest_api.parseJsonLog(allocator, JSON_MESSAGES[msg_idx]);
+        const entry = parsed.toLogEntry();
+
+        // Insert into storage
+        _ = try store.insert(entry);
+
+        const elapsed = timer.read() - start;
+
+        if (elapsed < min_latency) min_latency = elapsed;
+        if (elapsed > max_latency) max_latency = elapsed;
+    }
+
+    const total_time = timer.read();
+    const ops_per_sec = @as(f64, @floatFromInt(iterations)) / (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+    const avg_latency_us = @as(f64, @floatFromInt(total_time)) / @as(f64, @floatFromInt(iterations)) / 1000.0;
+
+    return BenchmarkResult{
+        .name = "JSON Full Pipeline",
+        .iterations = iterations,
+        .total_time_ns = total_time,
+        .ops_per_sec = ops_per_sec,
+        .avg_latency_us = avg_latency_us,
+        .min_latency_ns = min_latency,
+        .max_latency_ns = max_latency,
+    };
+}
+
 fn printResult(result: BenchmarkResult) void {
     var buf1: [32]u8 = undefined;
     var buf2: [32]u8 = undefined;
@@ -171,7 +341,12 @@ pub fn main() !void {
 
     std.debug.print("Running benchmarks...\n\n", .{});
 
-    var results: [3]BenchmarkResult = undefined;
+    var results: [7]BenchmarkResult = undefined;
+
+    // =============== Storage Benchmarks ===============
+    std.debug.print("═══════════════════════════════════════════════════════════════\n", .{});
+    std.debug.print("                    STORAGE BENCHMARKS\n", .{});
+    std.debug.print("═══════════════════════════════════════════════════════════════\n\n", .{});
 
     // Benchmark 1: Single insert operations
     std.debug.print("Benchmark 1: Single Insert (10,000 iterations)\n", .{});
@@ -188,13 +363,54 @@ pub fn main() !void {
     results[2] = try runBenchmark("Batch Insert x100", 100, benchBatchInsert100, &store, allocator);
     printResult(results[2]);
 
+    // =============== Message Processing Benchmarks ===============
+    std.debug.print("═══════════════════════════════════════════════════════════════\n", .{});
+    std.debug.print("                MESSAGE PROCESSING BENCHMARKS\n", .{});
+    std.debug.print("═══════════════════════════════════════════════════════════════\n\n", .{});
+
+    // Benchmark 4: Syslog message parsing
+    std.debug.print("Benchmark 4: Syslog Message Parsing (100,000 iterations)\n", .{});
+    results[3] = try runSyslogParseBenchmark(100_000);
+    printResult(results[3]);
+
+    // Benchmark 5: JSON message parsing
+    std.debug.print("Benchmark 5: JSON Message Parsing (100,000 iterations)\n", .{});
+    results[4] = try runJsonParseBenchmark(allocator, 100_000);
+    printResult(results[4]);
+
+    // =============== Full Pipeline Benchmarks ===============
+    std.debug.print("═══════════════════════════════════════════════════════════════\n", .{});
+    std.debug.print("               FULL PIPELINE BENCHMARKS (Parse + Insert)\n", .{});
+    std.debug.print("═══════════════════════════════════════════════════════════════\n\n", .{});
+
+    // Benchmark 6: Full syslog pipeline
+    std.debug.print("Benchmark 6: Syslog Full Pipeline (10,000 iterations)\n", .{});
+    results[5] = try runSyslogFullPipelineBenchmark(&store, 10_000);
+    printResult(results[5]);
+
+    // Benchmark 7: Full JSON REST API pipeline
+    std.debug.print("Benchmark 7: JSON Full Pipeline (10,000 iterations)\n", .{});
+    results[6] = try runJsonFullPipelineBenchmark(allocator, &store, 10_000);
+    printResult(results[6]);
+
     // Summary
     std.debug.print("═══════════════════════════════════════════════════════════════\n", .{});
     std.debug.print("                        SUMMARY\n", .{});
     std.debug.print("═══════════════════════════════════════════════════════════════\n", .{});
 
+    std.debug.print("\nStorage Operations:\n", .{});
     var buf: [32]u8 = undefined;
-    for (results) |result| {
+    for (results[0..3]) |result| {
+        std.debug.print("  {s}: {s} ops/sec\n", .{ result.name, formatNumber(&buf, result.ops_per_sec) });
+    }
+
+    std.debug.print("\nMessage Processing:\n", .{});
+    for (results[3..5]) |result| {
+        std.debug.print("  {s}: {s} ops/sec\n", .{ result.name, formatNumber(&buf, result.ops_per_sec) });
+    }
+
+    std.debug.print("\nFull Pipeline (Parse + Insert):\n", .{});
+    for (results[5..7]) |result| {
         std.debug.print("  {s}: {s} ops/sec\n", .{ result.name, formatNumber(&buf, result.ops_per_sec) });
     }
 
