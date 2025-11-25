@@ -159,7 +159,7 @@ CREATE TABLE logs (
     msg_id TEXT,
     message TEXT NOT NULL,
     raw_data BLOB NOT NULL,
-    hmac TEXT NOT NULL,
+    hmac BLOB NOT NULL,
     created_at INTEGER DEFAULT (strftime('%s', 'now'))
 );
 
@@ -175,7 +175,7 @@ CREATE INDEX idx_logs_app_name ON logs(app_name);
 
 Each log entry includes a chain-based HMAC for tamper detection:
 - `raw_data`: Required BLOB field containing the original binary message data
-- `hmac`: Required 64-character hex string (TEXT) representing 32-byte SHA-256 based chain digest
+- `hmac`: Required 32-byte BLOB field storing SHA-256 based chain digest
 
 The HMAC is computed using: `current_hmac = SHA256(raw_data || id) XOR previous_hmac`
 

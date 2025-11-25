@@ -62,29 +62,6 @@ pub const LogEntry = struct {
     hmac: [32]u8 = [_]u8{0} ** 32, // Chain-based HMAC for tamper detection (required)
 };
 
-/// Convert 32-byte array to 64-character hex string
-fn bytesToHex(bytes: [32]u8) [64]u8 {
-    const hex_chars = "0123456789abcdef";
-    var result: [64]u8 = undefined;
-    for (bytes, 0..) |byte, i| {
-        result[i * 2] = hex_chars[byte >> 4];
-        result[i * 2 + 1] = hex_chars[byte & 0x0F];
-    }
-    return result;
-}
-
-/// Convert 64-character hex string to 32-byte array
-fn hexToBytes(hex: []const u8) ![32]u8 {
-    if (hex.len != 64) return error.InvalidLength;
-    var result: [32]u8 = undefined;
-    for (0..32) |i| {
-        const high = std.fmt.charToDigit(hex[i * 2], 16) catch return error.InvalidHex;
-        const low = std.fmt.charToDigit(hex[i * 2 + 1], 16) catch return error.InvalidHex;
-        result[i] = (high << 4) | low;
-    }
-    return result;
-}
-
 pub const LogStorage = struct {
     db: sqlite.Database,
     insert_stmt: ?sqlite.Statement = null,
@@ -104,7 +81,7 @@ pub const LogStorage = struct {
         \\    msg_id TEXT,
         \\    message TEXT NOT NULL,
         \\    raw_data BLOB NOT NULL,
-        \\    hmac TEXT NOT NULL,
+        \\    hmac BLOB NOT NULL,
         \\    created_at INTEGER DEFAULT (strftime('%s', 'now'))
         \\);
         \\
@@ -137,9 +114,9 @@ pub const LogStorage = struct {
         var stmt = try db.prepare("SELECT hmac FROM logs ORDER BY id DESC LIMIT 1");
         defer stmt.finalize();
         if (try stmt.step()) {
-            if (stmt.columnText(0)) |hex_str| {
-                if (hex_str.len == 64) {
-                    prev_hmac = hexToBytes(hex_str) catch [_]u8{0} ** 32;
+            if (stmt.columnBlob(0)) |blob| {
+                if (blob.len == 32) {
+                    @memcpy(&prev_hmac, blob);
                 }
             }
         }
@@ -253,9 +230,8 @@ pub const LogStorage = struct {
         // Bind raw_data as BLOB (required field)
         try stmt.bindBlob(10, entry.raw_data);
 
-        // Bind computed HMAC as hex TEXT (required field)
-        const hmac_hex = bytesToHex(hmac);
-        try stmt.bind(11, &hmac_hex);
+        // Bind computed HMAC as BLOB (required field)
+        try stmt.bindBlob(11, &hmac);
 
         _ = try stmt.step();
         const actual_id = self.db.lastInsertRowId();
@@ -264,10 +240,9 @@ pub const LogStorage = struct {
         if (actual_id != expected_id) {
             // If IDs don't match (rare edge case), update HMAC with correct ID
             const correct_hmac = self.computeChainHmac(entry.raw_data, actual_id);
-            const correct_hmac_hex = bytesToHex(correct_hmac);
             var update_stmt = try self.db.prepare("UPDATE logs SET hmac = ? WHERE id = ?");
             defer update_stmt.finalize();
-            try update_stmt.bind(1, &correct_hmac_hex);
+            try update_stmt.bindBlob(1, &correct_hmac);
             try update_stmt.bind(2, actual_id);
             _ = try update_stmt.step();
             self.prev_hmac = correct_hmac;
@@ -315,11 +290,11 @@ pub const LogStorage = struct {
         errdefer results.deinit(allocator);
 
         while (try stmt.step()) {
-            // Get hmac from TEXT (hex string) - required field
+            // Get hmac from BLOB - required field
             var hmac: [32]u8 = [_]u8{0} ** 32;
-            if (stmt.columnText(11)) |hex_str| {
-                if (hex_str.len == 64) {
-                    hmac = hexToBytes(hex_str) catch [_]u8{0} ** 32;
+            if (stmt.columnBlob(11)) |blob| {
+                if (blob.len == 32) {
+                    @memcpy(&hmac, blob);
                 }
             }
 
