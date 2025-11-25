@@ -153,6 +153,7 @@ pub const JsonLogMessage = struct {
     host: ?[]const u8 = null,
     app_name: ?[]const u8 = null,
     timestamp: ?i64 = null,
+    raw_body: []const u8 = "", // Original JSON body
 
     pub fn toLogEntry(self: JsonLogMessage) LogEntry {
         const level: LogLevel = if (self.level) |l| blk: {
@@ -174,6 +175,7 @@ pub const JsonLogMessage = struct {
             .host = self.host orelse "unknown",
             .app_name = self.app_name,
             .message = self.message orelse "",
+            .raw_data = self.raw_body,
         };
     }
 };
@@ -181,7 +183,9 @@ pub const JsonLogMessage = struct {
 /// Parse JSON log message (simple parser)
 pub fn parseJsonLog(allocator: std.mem.Allocator, json: []const u8) !JsonLogMessage {
     _ = allocator;
-    var result = JsonLogMessage{};
+    var result = JsonLogMessage{
+        .raw_body = json, // Store original JSON body
+    };
 
     // Simple JSON parsing for common fields
     if (findJsonString(json, "message")) |msg| {

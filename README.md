@@ -158,7 +158,8 @@ CREATE TABLE logs (
     proc_id TEXT,
     msg_id TEXT,
     message TEXT NOT NULL,
-    raw_data TEXT,
+    raw_data BLOB NOT NULL,
+    hmac BLOB,
     created_at INTEGER DEFAULT (strftime('%s', 'now'))
 );
 
@@ -169,6 +170,19 @@ CREATE INDEX idx_logs_source ON logs(source);
 CREATE INDEX idx_logs_host ON logs(host);
 CREATE INDEX idx_logs_app_name ON logs(app_name);
 ```
+
+### Data Integrity (HMAC)
+
+Each log entry includes a chain-based HMAC for tamper detection:
+- `raw_data`: Required BLOB field containing the original binary message data
+- `hmac`: 32-byte SHA-256 based chain digest
+
+The HMAC is computed using: `current_hmac = SHA256(raw_data || id) XOR previous_hmac`
+
+This chain algorithm ensures:
+1. **Tamper detection**: Any modification to a log entry will invalidate its HMAC
+2. **Deletion detection**: Removing any entry breaks the chain
+3. **Order verification**: The chain validates the sequence of entries
 
 ## Architecture
 

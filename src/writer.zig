@@ -184,6 +184,7 @@ test "write queue basic operations" {
             .source = .syslog,
             .host = "test",
             .message = "Test message",
+            .raw_data = "raw test data",
         });
     }
 
@@ -217,6 +218,7 @@ test "write queue auto flush on batch size" {
             .source = .rest_api,
             .host = "test",
             .message = "Batch test",
+            .raw_data = "raw batch data",
         });
     }
 

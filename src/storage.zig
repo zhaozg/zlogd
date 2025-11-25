@@ -58,13 +58,15 @@ pub const LogEntry = struct {
     proc_id: ?[]const u8 = null,
     msg_id: ?[]const u8 = null,
     message: []const u8,
-    raw_data: ?[]const u8 = null,
+    raw_data: []const u8, // Required field, supports binary data
+    hmac: ?[32]u8 = null, // Chain-based HMAC for tamper detection
 };
 
 pub const LogStorage = struct {
     db: sqlite.Database,
     insert_stmt: ?sqlite.Statement = null,
     allocator: std.mem.Allocator,
+    prev_hmac: [32]u8 = [_]u8{0} ** 32, // Chain HMAC state
 
     const SCHEMA =
         \\CREATE TABLE IF NOT EXISTS logs (
@@ -78,7 +80,8 @@ pub const LogStorage = struct {
         \\    proc_id TEXT,
         \\    msg_id TEXT,
         \\    message TEXT NOT NULL,
-        \\    raw_data TEXT,
+        \\    raw_data BLOB NOT NULL,
+        \\    hmac BLOB,
         \\    created_at INTEGER DEFAULT (strftime('%s', 'now'))
         \\);
         \\
@@ -90,8 +93,8 @@ pub const LogStorage = struct {
     ;
 
     const INSERT_SQL =
-        \\INSERT INTO logs (timestamp, level, source, host, facility, app_name, proc_id, msg_id, message, raw_data)
-        \\VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        \\INSERT INTO logs (timestamp, level, source, host, facility, app_name, proc_id, msg_id, message, raw_data, hmac)
+        \\VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ;
 
     pub fn init(allocator: std.mem.Allocator, db_path: [*:0]const u8) !LogStorage {
@@ -106,9 +109,22 @@ pub const LogStorage = struct {
         // Create schema
         try db.exec(SCHEMA);
 
+        // Load the last HMAC from existing records for chain continuation
+        var prev_hmac: [32]u8 = [_]u8{0} ** 32;
+        var stmt = try db.prepare("SELECT hmac FROM logs ORDER BY id DESC LIMIT 1");
+        defer stmt.finalize();
+        if (try stmt.step()) {
+            if (stmt.columnBlob(0)) |blob| {
+                if (blob.len == 32) {
+                    @memcpy(&prev_hmac, blob);
+                }
+            }
+        }
+
         return LogStorage{
             .db = db,
             .allocator = allocator,
+            .prev_hmac = prev_hmac,
         };
     }
 
@@ -136,6 +152,29 @@ pub const LogStorage = struct {
             self.insert_stmt = try self.db.prepare(INSERT_SQL);
         }
         return &self.insert_stmt.?;
+    }
+
+    /// Compute chain HMAC: current_value = hash(raw_data || id) XOR previous_value
+    /// Uses SHA-256 for hashing
+    fn computeChainHmac(self: *LogStorage, raw_data: []const u8, id: i64) [32]u8 {
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+
+        // Hash raw_data || id
+        hasher.update(raw_data);
+
+        // Convert id to bytes (little-endian)
+        const id_bytes: [8]u8 = @bitCast(id);
+        hasher.update(&id_bytes);
+
+        const hash_result = hasher.finalResult();
+
+        // XOR with previous HMAC
+        var result: [32]u8 = undefined;
+        for (&result, hash_result, self.prev_hmac) |*r, h, p| {
+            r.* = h ^ p;
+        }
+
+        return result;
     }
 
     pub fn insert(self: *LogStorage, entry: LogEntry) !i64 {
@@ -176,14 +215,29 @@ pub const LogStorage = struct {
 
         try stmt.bind(9, entry.message);
 
-        if (entry.raw_data) |raw| {
-            try stmt.bind(10, raw);
-        } else {
-            try stmt.bind(10, null);
-        }
+        // Bind raw_data as BLOB (required field)
+        try stmt.bindBlob(10, entry.raw_data);
+
+        // Insert first with NULL hmac to get the ID
+        try stmt.bindBlob(11, null);
 
         _ = try stmt.step();
-        return self.db.lastInsertRowId();
+        const id = self.db.lastInsertRowId();
+
+        // Compute chain HMAC using the inserted ID
+        const hmac = self.computeChainHmac(entry.raw_data, id);
+
+        // Update the record with computed HMAC
+        var update_stmt = try self.db.prepare("UPDATE logs SET hmac = ? WHERE id = ?");
+        defer update_stmt.finalize();
+        try update_stmt.bindBlob(1, &hmac);
+        try update_stmt.bind(2, id);
+        _ = try update_stmt.step();
+
+        // Update previous HMAC for chain continuity
+        self.prev_hmac = hmac;
+
+        return id;
     }
 
     pub fn insertBatch(self: *LogStorage, entries: []const LogEntry) !usize {
@@ -210,7 +264,7 @@ pub const LogStorage = struct {
 
     pub fn queryByTimeRange(self: *LogStorage, allocator: std.mem.Allocator, start: i64, end: i64, limit: u32) ![]LogEntry {
         var stmt = try self.db.prepare(
-            "SELECT id, timestamp, level, source, host, facility, app_name, proc_id, msg_id, message, raw_data FROM logs WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp DESC LIMIT ?",
+            "SELECT id, timestamp, level, source, host, facility, app_name, proc_id, msg_id, message, raw_data, hmac FROM logs WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp DESC LIMIT ?",
         );
         defer stmt.finalize();
 
@@ -222,6 +276,16 @@ pub const LogStorage = struct {
         errdefer results.deinit(allocator);
 
         while (try stmt.step()) {
+            // Get hmac if present
+            var hmac: ?[32]u8 = null;
+            if (stmt.columnBlob(11)) |blob| {
+                if (blob.len == 32) {
+                    var hmac_arr: [32]u8 = undefined;
+                    @memcpy(&hmac_arr, blob);
+                    hmac = hmac_arr;
+                }
+            }
+
             const entry = LogEntry{
                 .id = stmt.columnInt(0),
                 .timestamp = stmt.columnInt(1),
@@ -233,7 +297,8 @@ pub const LogStorage = struct {
                 .proc_id = if (stmt.columnText(7)) |p| try allocator.dupe(u8, p) else null,
                 .msg_id = if (stmt.columnText(8)) |m| try allocator.dupe(u8, m) else null,
                 .message = if (stmt.columnText(9)) |msg| try allocator.dupe(u8, msg) else "",
-                .raw_data = if (stmt.columnText(10)) |r| try allocator.dupe(u8, r) else null,
+                .raw_data = if (stmt.columnBlob(10)) |r| try allocator.dupe(u8, r) else "",
+                .hmac = hmac,
             };
             try results.append(allocator, entry);
         }
@@ -244,9 +309,10 @@ pub const LogStorage = struct {
 
 test "log storage basic operations" {
     const allocator = std.testing.allocator;
-    var storage = try LogStorage.initInMemory(allocator);
-    defer storage.deinit();
+    var storage_inst = try LogStorage.initInMemory(allocator);
+    defer storage_inst.deinit();
 
+    const raw_msg = "<134>Test raw syslog message";
     const entry = LogEntry{
         .timestamp = std.time.timestamp(),
         .level = .info,
@@ -255,19 +321,20 @@ test "log storage basic operations" {
         .facility = 16,
         .app_name = "test",
         .message = "Test message",
+        .raw_data = raw_msg,
     };
 
-    const id = try storage.insert(entry);
+    const id = try storage_inst.insert(entry);
     try std.testing.expect(id == 1);
 
-    const count = try storage.getLogCount();
+    const count = try storage_inst.getLogCount();
     try std.testing.expect(count == 1);
 }
 
 test "log storage batch insert" {
     const allocator = std.testing.allocator;
-    var storage = try LogStorage.initInMemory(allocator);
-    defer storage.deinit();
+    var storage_inst = try LogStorage.initInMemory(allocator);
+    defer storage_inst.deinit();
 
     const now = std.time.timestamp();
     var entries: [100]LogEntry = undefined;
@@ -278,12 +345,101 @@ test "log storage batch insert" {
             .source = .rest_api,
             .host = "192.168.1.1",
             .message = "Batch test message",
+            .raw_data = "raw batch data",
         };
     }
 
-    const inserted = try storage.insertBatch(&entries);
+    const inserted = try storage_inst.insertBatch(&entries);
     try std.testing.expect(inserted == 100);
 
-    const count = try storage.getLogCount();
+    const count = try storage_inst.getLogCount();
     try std.testing.expect(count == 100);
+}
+
+test "chain hmac computation and verification" {
+    const allocator = std.testing.allocator;
+    var storage_inst = try LogStorage.initInMemory(allocator);
+    defer storage_inst.deinit();
+
+    // Insert multiple entries and verify HMAC chain
+    const entry1 = LogEntry{
+        .timestamp = std.time.timestamp(),
+        .level = .info,
+        .source = .syslog,
+        .host = "localhost",
+        .message = "First message",
+        .raw_data = "raw data 1",
+    };
+
+    const entry2 = LogEntry{
+        .timestamp = std.time.timestamp() + 1,
+        .level = .warning,
+        .source = .rest_api,
+        .host = "localhost",
+        .message = "Second message",
+        .raw_data = "raw data 2",
+    };
+
+    const id1 = try storage_inst.insert(entry1);
+    try std.testing.expect(id1 == 1);
+
+    const id2 = try storage_inst.insert(entry2);
+    try std.testing.expect(id2 == 2);
+
+    // Query entries and verify HMAC is set
+    const results = try storage_inst.queryByTimeRange(allocator, 0, std.math.maxInt(i64), 10);
+    defer {
+        for (results) |r| {
+            allocator.free(r.host);
+            allocator.free(r.message);
+            allocator.free(r.raw_data);
+            if (r.app_name) |a| allocator.free(a);
+            if (r.proc_id) |p| allocator.free(p);
+            if (r.msg_id) |m| allocator.free(m);
+        }
+        allocator.free(results);
+    }
+
+    try std.testing.expect(results.len == 2);
+
+    // Both entries should have HMAC set
+    try std.testing.expect(results[0].hmac != null);
+    try std.testing.expect(results[1].hmac != null);
+
+    // HMACs should be different (chain property)
+    try std.testing.expect(!std.mem.eql(u8, &results[0].hmac.?, &results[1].hmac.?));
+}
+
+test "binary data support in raw_data" {
+    const allocator = std.testing.allocator;
+    var storage_inst = try LogStorage.initInMemory(allocator);
+    defer storage_inst.deinit();
+
+    // Test with binary data including null bytes
+    const binary_data = [_]u8{ 0x00, 0x01, 0x02, 0xFF, 0xFE, 0x00, 0x80, 0x7F };
+    const entry = LogEntry{
+        .timestamp = std.time.timestamp(),
+        .level = .debug,
+        .source = .snmp,
+        .host = "localhost",
+        .message = "Binary test",
+        .raw_data = &binary_data,
+    };
+
+    const id = try storage_inst.insert(entry);
+    try std.testing.expect(id == 1);
+
+    // Query and verify binary data is preserved
+    const results = try storage_inst.queryByTimeRange(allocator, 0, std.math.maxInt(i64), 10);
+    defer {
+        for (results) |r| {
+            allocator.free(r.host);
+            allocator.free(r.message);
+            allocator.free(r.raw_data);
+        }
+        allocator.free(results);
+    }
+
+    try std.testing.expect(results.len == 1);
+    try std.testing.expectEqualSlices(u8, &binary_data, results[0].raw_data);
 }
