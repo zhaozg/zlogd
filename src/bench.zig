@@ -1,5 +1,5 @@
 //! Performance Benchmark for zlogd
-//! Measures throughput and latency for log insertion and message processing operations
+//! Measures throughput and latency for log insertion, syslog/JSON parsing, and full pipeline operations
 
 const std = @import("std");
 const storage = @import("storage.zig");
@@ -144,7 +144,7 @@ fn runSyslogParseBenchmark(iterations: u64) !BenchmarkResult {
     while (i < iterations) : (i += 1) {
         const msg_idx = i % SYSLOG_MESSAGES.len;
         const start = timer.read();
-        const result = syslog.parseSyslogMessage(SYSLOG_MESSAGES[msg_idx]) catch continue;
+        const result = try syslog.parseSyslogMessage(SYSLOG_MESSAGES[msg_idx]);
         _ = result.toLogEntry();
         const elapsed = timer.read() - start;
 
@@ -177,7 +177,7 @@ fn runJsonParseBenchmark(allocator: std.mem.Allocator, iterations: u64) !Benchma
     while (i < iterations) : (i += 1) {
         const msg_idx = i % JSON_MESSAGES.len;
         const start = timer.read();
-        const result = rest_api.parseJsonLog(allocator, JSON_MESSAGES[msg_idx]) catch continue;
+        const result = try rest_api.parseJsonLog(allocator, JSON_MESSAGES[msg_idx]);
         _ = result.toLogEntry();
         const elapsed = timer.read() - start;
 
@@ -212,7 +212,7 @@ fn runSyslogFullPipelineBenchmark(store: *storage.LogStorage, iterations: u64) !
         const start = timer.read();
 
         // Parse syslog message
-        const parsed = syslog.parseSyslogMessage(SYSLOG_MESSAGES[msg_idx]) catch continue;
+        const parsed = try syslog.parseSyslogMessage(SYSLOG_MESSAGES[msg_idx]);
         const entry = parsed.toLogEntry();
 
         // Insert into storage
@@ -251,7 +251,7 @@ fn runJsonFullPipelineBenchmark(allocator: std.mem.Allocator, store: *storage.Lo
         const start = timer.read();
 
         // Parse JSON message
-        const parsed = rest_api.parseJsonLog(allocator, JSON_MESSAGES[msg_idx]) catch continue;
+        const parsed = try rest_api.parseJsonLog(allocator, JSON_MESSAGES[msg_idx]);
         const entry = parsed.toLogEntry();
 
         // Insert into storage

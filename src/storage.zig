@@ -110,7 +110,7 @@ pub const LogStorage = struct {
         // Create schema
         try db.exec(SCHEMA);
 
-        // Load the last HMAC and next ID from existing records for chain continuation
+        // Load the last HMAC and next_id from existing records for chain continuation
         var prev_hmac: [32]u8 = [_]u8{0} ** 32;
         var next_id: i64 = 1;
         var stmt = try db.prepare("SELECT id, hmac FROM logs ORDER BY id DESC LIMIT 1");
