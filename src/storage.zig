@@ -134,9 +134,12 @@ pub const LogStorage = struct {
 
         try db.exec(SCHEMA);
 
+        // For in-memory database, prev_hmac is initialized to zeros
+        // (new empty database has no previous HMAC)
         return LogStorage{
             .db = db,
             .allocator = allocator,
+            .prev_hmac = [_]u8{0} ** 32,
         };
     }
 
@@ -178,6 +181,15 @@ pub const LogStorage = struct {
     }
 
     pub fn insert(self: *LogStorage, entry: LogEntry) !i64 {
+        // Get the next expected ID (MAX(id) + 1 or 1 if table is empty)
+        var id_stmt = try self.db.prepare("SELECT COALESCE(MAX(id), 0) + 1 FROM logs");
+        defer id_stmt.finalize();
+        _ = try id_stmt.step();
+        const expected_id = id_stmt.columnInt(0);
+
+        // Compute chain HMAC using the expected ID
+        const hmac = self.computeChainHmac(entry.raw_data, expected_id);
+
         var stmt = try self.getInsertStmt();
         defer {
             stmt.reset() catch {};
@@ -218,26 +230,28 @@ pub const LogStorage = struct {
         // Bind raw_data as BLOB (required field)
         try stmt.bindBlob(10, entry.raw_data);
 
-        // Insert first with NULL hmac to get the ID
-        try stmt.bindBlob(11, null);
+        // Bind computed HMAC
+        try stmt.bindBlob(11, &hmac);
 
         _ = try stmt.step();
-        const id = self.db.lastInsertRowId();
+        const actual_id = self.db.lastInsertRowId();
 
-        // Compute chain HMAC using the inserted ID
-        const hmac = self.computeChainHmac(entry.raw_data, id);
+        // Verify ID matches expected (should always match with AUTOINCREMENT)
+        if (actual_id != expected_id) {
+            // If IDs don't match (rare edge case), update HMAC with correct ID
+            const correct_hmac = self.computeChainHmac(entry.raw_data, actual_id);
+            var update_stmt = try self.db.prepare("UPDATE logs SET hmac = ? WHERE id = ?");
+            defer update_stmt.finalize();
+            try update_stmt.bindBlob(1, &correct_hmac);
+            try update_stmt.bind(2, actual_id);
+            _ = try update_stmt.step();
+            self.prev_hmac = correct_hmac;
+        } else {
+            // Update previous HMAC for chain continuity
+            self.prev_hmac = hmac;
+        }
 
-        // Update the record with computed HMAC
-        var update_stmt = try self.db.prepare("UPDATE logs SET hmac = ? WHERE id = ?");
-        defer update_stmt.finalize();
-        try update_stmt.bindBlob(1, &hmac);
-        try update_stmt.bind(2, id);
-        _ = try update_stmt.step();
-
-        // Update previous HMAC for chain continuity
-        self.prev_hmac = hmac;
-
-        return id;
+        return actual_id;
     }
 
     pub fn insertBatch(self: *LogStorage, entries: []const LogEntry) !usize {
