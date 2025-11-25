@@ -122,6 +122,17 @@ pub const Statement = struct {
         return @as([*]const u8, @ptrCast(blob))[0..@as(usize, @intCast(len))];
     }
 
+    pub fn bindBlob(self: *Statement, index: u32, value: ?[]const u8) Error!void {
+        const idx = @as(c_int, @intCast(index));
+        const rc = if (value) |v|
+            c.sqlite3_bind_blob(self.stmt, idx, v.ptr, @as(c_int, @intCast(v.len)), c.SQLITE_TRANSIENT)
+        else
+            c.sqlite3_bind_null(self.stmt, idx);
+        if (rc != c.SQLITE_OK) {
+            return Error.SqliteError;
+        }
+    }
+
     pub fn reset(self: *Statement) Error!void {
         if (c.sqlite3_reset(self.stmt) != c.SQLITE_OK) {
             return Error.SqliteError;

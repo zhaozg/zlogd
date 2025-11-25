@@ -67,6 +67,7 @@ fn benchSingleInsert(store: *storage.LogStorage, allocator: std.mem.Allocator) !
         .host = "benchmark-host",
         .app_name = "bench",
         .message = "Benchmark test message for performance measurement",
+        .raw_data = "Benchmark raw data for performance testing",
     };
     _ = try store.insert(entry);
 }
@@ -83,6 +84,7 @@ fn benchBatchInsert10(store: *storage.LogStorage, allocator: std.mem.Allocator) 
             .host = "batch-host",
             .app_name = "batch-bench",
             .message = "Batch benchmark test message",
+            .raw_data = "Batch raw data for benchmark",
         };
     }
     _ = try store.insertBatch(&entries);
@@ -100,6 +102,7 @@ fn benchBatchInsert100(store: *storage.LogStorage, allocator: std.mem.Allocator)
             .host = "batch-host-100",
             .app_name = "batch-bench-100",
             .message = "Large batch benchmark test message for throughput testing",
+            .raw_data = "Large batch raw data for high throughput benchmark testing",
         };
     }
     _ = try store.insertBatch(&entries);
