@@ -218,8 +218,8 @@ pub const LogStorage = struct {
         try stmt.bind(2, end);
         try stmt.bind(3, @as(i64, limit));
 
-        var results = std.ArrayList(LogEntry).empty;
-        errdefer results.deinit(allocator);
+        var results = std.ArrayList(LogEntry).init(allocator);
+        errdefer results.deinit();
 
         while (try stmt.step()) {
             const entry = LogEntry{
@@ -235,10 +235,10 @@ pub const LogStorage = struct {
                 .message = if (stmt.columnText(9)) |msg| try allocator.dupe(u8, msg) else "",
                 .raw_data = if (stmt.columnText(10)) |r| try allocator.dupe(u8, r) else null,
             };
-            try results.append(allocator, entry);
+            try results.append(entry);
         }
 
-        return results.toOwnedSlice(allocator);
+        return results.toOwnedSlice();
     }
 };
 

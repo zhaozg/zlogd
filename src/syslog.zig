@@ -107,6 +107,8 @@ fn parseRFC3164Timestamp(data: []const u8) ?struct { timestamp: i64, rest: []con
 
     // Calculate approximate timestamp for this year
     // Days from month start (cumulative days before each month)
+    // NOTE: This does not account for leap years, which may cause timestamp
+    // inaccuracies of up to 1 day for dates in March-December during leap years.
     const days_before_month = [_]u16{ 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
 
     // Get current year's January 1st timestamp (approximate)

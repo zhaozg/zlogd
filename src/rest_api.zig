@@ -77,8 +77,8 @@ pub const HttpResponse = struct {
     }
 
     pub fn format(self: *HttpResponse, allocator: std.mem.Allocator) ![]u8 {
-        var buf = std.ArrayList(u8).empty;
-        const writer = buf.writer(allocator);
+        var buf = std.ArrayList(u8).init(allocator);
+        const writer = buf.writer();
 
         try writer.print("HTTP/1.1 {} {s}\r\n", .{ self.status, self.status_text });
         try writer.print("Content-Length: {}\r\n", .{self.body.len});
@@ -93,7 +93,7 @@ pub const HttpResponse = struct {
         try writer.writeAll("\r\n");
         try writer.writeAll(self.body);
 
-        return buf.toOwnedSlice(allocator);
+        return buf.toOwnedSlice();
     }
 };
 

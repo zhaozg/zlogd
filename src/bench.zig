@@ -125,10 +125,10 @@ fn saveResultsJson(allocator: std.mem.Allocator, results: []const BenchmarkResul
     var file = try std.fs.cwd().createFile("benchmark_results.json", .{});
     defer file.close();
 
-    var buf = std.ArrayList(u8).empty;
-    defer buf.deinit(allocator);
+    var buf = std.ArrayList(u8).init(allocator);
+    defer buf.deinit();
 
-    const w = buf.writer(allocator);
+    const w = buf.writer();
     try w.writeAll("{\n  \"benchmarks\": [\n");
 
     for (results, 0..) |result, i| {

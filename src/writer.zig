@@ -19,7 +19,7 @@ pub const WriteQueue = struct {
 
     pub fn init(allocator: std.mem.Allocator, store: *storage.LogStorage) WriteQueue {
         return WriteQueue{
-            .queue = std.ArrayList(LogEntry).empty,
+            .queue = std.ArrayList(LogEntry).init(allocator),
             .mutex = std.Thread.Mutex{},
             .storage_ptr = store,
             .allocator = allocator,
@@ -32,7 +32,7 @@ pub const WriteQueue = struct {
     pub fn deinit(self: *WriteQueue) void {
         // Flush remaining items
         _ = self.forceFlush() catch {};
-        self.queue.deinit(self.allocator);
+        self.queue.deinit();
     }
 
     pub fn setBatchSize(self: *WriteQueue, batch_size: usize) void {
@@ -48,7 +48,7 @@ pub const WriteQueue = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        try self.queue.append(self.allocator, entry);
+        try self.queue.append(entry);
 
         // Check if we should flush
         if (self.queue.items.len >= self.batch_size) {
@@ -62,7 +62,7 @@ pub const WriteQueue = struct {
         defer self.mutex.unlock();
 
         for (entries) |entry| {
-            try self.queue.append(self.allocator, entry);
+            try self.queue.append(entry);
         }
 
         // Check if we should flush

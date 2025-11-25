@@ -64,10 +64,10 @@ pub const SnmpTrap = struct {
 
     pub fn toLogEntry(self: SnmpTrap, allocator: std.mem.Allocator) !LogEntry {
         // Build message from varbinds
-        var msg_buf = std.ArrayList(u8).empty;
-        defer msg_buf.deinit(allocator);
+        var msg_buf = std.ArrayList(u8).init(allocator);
+        defer msg_buf.deinit();
 
-        const writer = msg_buf.writer(allocator);
+        const writer = msg_buf.writer();
 
         if (self.generic_trap) |gt| {
             try writer.print("Trap Type: {} ", .{gt});
@@ -80,7 +80,7 @@ pub const SnmpTrap = struct {
             try writer.print("[{s}={s}] ", .{ vb.oid, vb.value });
         }
 
-        const message = try msg_buf.toOwnedSlice(allocator);
+        const message = try msg_buf.toOwnedSlice();
         errdefer allocator.free(message);
 
         // Format agent address as host
@@ -194,10 +194,10 @@ fn parseAsn1Sequence(data: []const u8) SnmpError!struct { content: []const u8, c
 fn parseOidToString(allocator: std.mem.Allocator, data: []const u8) ![]const u8 {
     if (data.len < 2) return allocator.dupe(u8, "");
 
-    var result = std.ArrayList(u8).empty;
-    errdefer result.deinit(allocator);
+    var result = std.ArrayList(u8).init(allocator);
+    errdefer result.deinit();
 
-    const writer = result.writer(allocator);
+    const writer = result.writer();
 
     // First two components are encoded in first byte
     const first = data[0];
@@ -216,13 +216,13 @@ fn parseOidToString(allocator: std.mem.Allocator, data: []const u8) ![]const u8 
         try writer.print(".{}", .{component});
     }
 
-    return result.toOwnedSlice(allocator);
+    return result.toOwnedSlice();
 }
 
 /// Parse SNMP trap packet
 pub fn parseSnmpTrap(allocator: std.mem.Allocator, data: []const u8) !SnmpTrap {
-    var varbinds_list = std.ArrayList(VarBind).empty;
-    errdefer varbinds_list.deinit(allocator);
+    var varbinds_list = std.ArrayList(VarBind).init(allocator);
+    errdefer varbinds_list.deinit();
 
     // Parse outer sequence
     const seq = try parseAsn1Sequence(data);
@@ -268,7 +268,7 @@ pub fn parseSnmpTrap(allocator: std.mem.Allocator, data: []const u8) !SnmpTrap {
     }
 
     // Return parsed trap
-    trap.varbinds = try varbinds_list.toOwnedSlice(allocator);
+    trap.varbinds = try varbinds_list.toOwnedSlice();
     return trap;
 }
 
