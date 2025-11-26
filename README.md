@@ -7,7 +7,7 @@ A high-performance log collection and storage server implemented in Zig.
 ## Features
 
 - **SYSLOG receiver** (UDP port 514) - Supports RFC 3164 (BSD) syslog format
-- **RESTful API** (HTTP port 8080) - JSON-based log submission
+- **RESTful API** (HTTP port 8080) - JSON-based log submission via [http.zig](https://github.com/karlseguin/http.zig)
 - **SNMP trap receiver** (UDP port 162) - SNMP v1/v2c trap messages
 - **SQLite3 storage** - WAL mode for high-performance concurrent writes
 - **Async batched writes** - Configurable batch size and flush intervals
