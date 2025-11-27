@@ -40,7 +40,7 @@ pub const Config = struct {
 pub const Server = struct {
     config: Config,
     storage_inst: LogStorage,
-    write_queue: WriteQueue,
+    write_queue: ?WriteQueue,
     stats: Stats,
     syslog_server: ?syslog.SyslogServer,
     rest_server: ?rest_api.RestApiServer,
@@ -49,17 +49,14 @@ pub const Server = struct {
     running: std.atomic.Value(bool),
 
     pub fn init(allocator: std.mem.Allocator, config: Config) !Server {
-        var store = try LogStorage.init(allocator, config.db_path);
+        const store = try LogStorage.init(allocator, config.db_path);
         errdefer store.deinit();
-
-        var queue = WriteQueue.init(allocator, &store);
-        queue.setBatchSize(config.batch_size);
-        queue.setFlushInterval(config.flush_interval_ms);
 
         return Server{
             .config = config,
             .storage_inst = store,
-            .write_queue = queue,
+            // write_queue is initialized in start() with correct pointer to storage_inst
+            .write_queue = null,
             .stats = Stats.init(),
             .syslog_server = null,
             .rest_server = null,
@@ -71,12 +68,20 @@ pub const Server = struct {
 
     pub fn deinit(self: *Server) void {
         self.stop();
-        self.write_queue.deinit();
+        if (self.write_queue) |*wq| {
+            wq.deinit();
+        }
         self.storage_inst.deinit();
     }
 
     pub fn start(self: *Server) !void {
         self.running.store(true, .seq_cst);
+
+        // Initialize write queue with correct pointer to storage_inst
+        // (must be done after Server is in its final memory location)
+        self.write_queue = WriteQueue.init(self.allocator, &self.storage_inst);
+        self.write_queue.?.setBatchSize(self.config.batch_size);
+        self.write_queue.?.setFlushInterval(self.config.flush_interval_ms);
 
         // Initialize servers
         if (self.config.enable_syslog) {
@@ -145,7 +150,7 @@ pub const Server = struct {
         // Process syslog
         if (self.syslog_server) |*srv| {
             if (try srv.receiveOne()) |entry| {
-                try self.write_queue.enqueue(entry);
+                try self.write_queue.?.enqueue(entry);
                 self.stats.recordReceived(1);
             }
         }
@@ -158,13 +163,13 @@ pub const Server = struct {
         // Process SNMP
         if (self.snmp_server) |*srv| {
             if (try srv.receiveOne()) |entry| {
-                try self.write_queue.enqueue(entry);
+                try self.write_queue.?.enqueue(entry);
                 self.stats.recordReceived(1);
             }
         }
 
         // Try to flush write queue
-        const flushed = try self.write_queue.tryFlush();
+        const flushed = try self.write_queue.?.tryFlush();
         if (flushed > 0) {
             self.stats.recordWritten(flushed);
         }
@@ -182,7 +187,7 @@ pub const Server = struct {
             .received = self.stats.getReceived(),
             .written = self.stats.getWritten(),
             .errors = self.stats.getErrors(),
-            .queued = self.write_queue.size(),
+            .queued = if (self.write_queue) |*wq| wq.size() else 0,
             .batches = self.stats.getBatchCount(),
         };
     }
