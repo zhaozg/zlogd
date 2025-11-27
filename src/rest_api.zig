@@ -275,3 +275,76 @@ test "parse JSON log" {
     try std.testing.expectEqualStrings("error", result.level.?);
     try std.testing.expectEqualStrings("server1", result.host.?);
 }
+
+test "REST API JSON log to entry and storage" {
+    const allocator = std.testing.allocator;
+    var store = try storage.LogStorage.initInMemory(allocator);
+    defer store.deinit();
+
+    // Test the same JSON format used in REST API
+    const json = "{\"message\":\"Application started\",\"level\":\"info\",\"host\":\"server1\",\"app_name\":\"myapp\",\"timestamp\":1700000000}";
+
+    const json_msg = try parseJsonLog(allocator, json);
+    const entry = json_msg.toLogEntry();
+
+    // Insert into storage
+    const id = try store.insert(entry);
+    try std.testing.expect(id == 1);
+
+    // Verify it was stored
+    const count = try store.getLogCount();
+    try std.testing.expect(count == 1);
+
+    // Query and verify content
+    const results = try store.queryByTimeRange(allocator, 0, std.math.maxInt(i64), 10);
+    defer {
+        for (results) |r| {
+            allocator.free(r.host);
+            allocator.free(r.message);
+            allocator.free(r.raw_data);
+            if (r.app_name) |a| allocator.free(a);
+            if (r.proc_id) |p| allocator.free(p);
+            if (r.msg_id) |m| allocator.free(m);
+        }
+        allocator.free(results);
+    }
+
+    try std.testing.expect(results.len == 1);
+    try std.testing.expectEqualStrings("server1", results[0].host);
+    try std.testing.expectEqualStrings("Application started", results[0].message);
+    try std.testing.expectEqualStrings("myapp", results[0].app_name.?);
+    try std.testing.expect(results[0].source == .rest_api);
+    try std.testing.expect(results[0].level == .info);
+    try std.testing.expect(results[0].timestamp == 1700000000);
+    // Verify raw_data contains original JSON
+    try std.testing.expectEqualStrings(json, results[0].raw_data);
+}
+
+test "REST API with all log levels" {
+    const allocator = std.testing.allocator;
+    var store = try storage.LogStorage.initInMemory(allocator);
+    defer store.deinit();
+
+    const levels = [_]struct { name: []const u8, expected: LogLevel }{
+        .{ .name = "emergency", .expected = .emergency },
+        .{ .name = "alert", .expected = .alert },
+        .{ .name = "critical", .expected = .critical },
+        .{ .name = "error", .expected = .err },
+        .{ .name = "warning", .expected = .warning },
+        .{ .name = "notice", .expected = .notice },
+        .{ .name = "info", .expected = .info },
+        .{ .name = "debug", .expected = .debug },
+    };
+
+    var buf: [256]u8 = undefined;
+    for (levels, 1..) |lvl, i| {
+        const json = std.fmt.bufPrint(&buf, "{{\"message\":\"Test\",\"level\":\"{s}\",\"host\":\"h\"}}", .{lvl.name}) catch unreachable;
+        const json_msg = try parseJsonLog(allocator, json);
+        const entry = json_msg.toLogEntry();
+        const id = try store.insert(entry);
+        try std.testing.expect(id == @as(i64, @intCast(i)));
+    }
+
+    const count = try store.getLogCount();
+    try std.testing.expect(count == 8);
+}
