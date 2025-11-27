@@ -62,7 +62,17 @@ jobs:
         # Start server with non-privileged ports
         ./zig-out/bin/zlogd --syslog-port 5514 --rest-port 8080 --snmp-port 1162 &
         SERVER_PID=$!
-        sleep 2
+        
+        # Wait for server to start and check if it's listening
+        for i in {1..10}; do
+          nc -z 127.0.0.1 8080 && echo "Server started successfully" && break
+          if [ $i -eq 10 ]; then
+            echo "ERROR: Server failed to start"
+            kill $SERVER_PID 2>/dev/null || true
+            exit 1
+          fi
+          sleep 1
+        done
         
         # Test 1: Send syslog message via UDP
         echo "Testing syslog UDP..."
