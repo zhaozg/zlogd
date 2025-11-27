@@ -1,6 +1,12 @@
 .{
     .name = .zlogd,
     .version = "0.1.0",
+    .dependencies = .{
+        .httpz = .{
+            .url = "git+https://github.com/karlseguin/http.zig?ref=master#a4477b1dbdc5b820fd4ad301797ca6399f7eb6e4",
+            .hash = "httpz-0.0.0-PNVzrBgtBwCVkSJyophIX6WHwDR0r8XhBGQr96Kk-1El",
+        },
+    },
     .minimum_zig_version = "0.15.0",
     .fingerprint = 0x275893f4575d37f7,
     .paths = .{
