@@ -80,8 +80,9 @@ pub const Server = struct {
         // Initialize write queue with correct pointer to storage_inst
         // (must be done after Server is in its final memory location)
         self.write_queue = WriteQueue.init(self.allocator, &self.storage_inst);
-        self.write_queue.?.setBatchSize(self.config.batch_size);
-        self.write_queue.?.setFlushInterval(self.config.flush_interval_ms);
+        const wq = &self.write_queue.?;
+        wq.setBatchSize(self.config.batch_size);
+        wq.setFlushInterval(self.config.flush_interval_ms);
 
         // Initialize servers
         if (self.config.enable_syslog) {
