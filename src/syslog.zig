@@ -263,7 +263,7 @@ pub const SyslogServer = struct {
 
     pub fn startUDP(self: *SyslogServer) !void {
         const address = net.Address.initIp4(.{ 0, 0, 0, 0 }, self.port);
-        const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+        const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, 0);
         errdefer std.posix.close(sock);
 
         try std.posix.bind(sock, &address.any, @sizeOf(@TypeOf(address.in)));
@@ -334,4 +334,104 @@ test "parse simple syslog message" {
     try std.testing.expectEqualStrings("Hello", result.hostname);
     // "World" becomes app_name in simple messages without timestamp
     try std.testing.expectEqualStrings("World", result.app_name.?);
+}
+
+test "syslog message to log entry and storage" {
+    const allocator = std.testing.allocator;
+    var store = try storage.LogStorage.initInMemory(allocator);
+    defer store.deinit();
+
+    // Test the same message format used in nc command:
+    // echo "<134>Jan 15 12:34:56 myhost myapp[1234]: Test message" | nc -u -w 1 127.0.0.1 514
+    const msg = "<134>Jan 15 12:34:56 myhost myapp[1234]: Test message";
+    const result = try parseSyslogMessage(msg);
+    const entry = result.toLogEntry();
+
+    // Insert into storage
+    const id = try store.insert(entry);
+    try std.testing.expect(id == 1);
+
+    // Verify it was stored
+    const count = try store.getLogCount();
+    try std.testing.expect(count == 1);
+
+    // Query and verify content
+    const results = try store.queryByTimeRange(allocator, 0, std.math.maxInt(i64), 10);
+    defer {
+        for (results) |r| {
+            allocator.free(r.host);
+            allocator.free(r.message);
+            allocator.free(r.raw_data);
+            if (r.app_name) |a| allocator.free(a);
+            if (r.proc_id) |p| allocator.free(p);
+            if (r.msg_id) |m| allocator.free(m);
+        }
+        allocator.free(results);
+    }
+
+    try std.testing.expect(results.len == 1);
+    try std.testing.expectEqualStrings("myhost", results[0].host);
+    try std.testing.expectEqualStrings("Test message", results[0].message);
+    try std.testing.expectEqualStrings("myapp", results[0].app_name.?);
+    try std.testing.expectEqualStrings("1234", results[0].proc_id.?);
+    try std.testing.expect(results[0].source == .syslog);
+    try std.testing.expect(results[0].level == .info); // priority 134 -> severity 6 -> info
+}
+
+test "syslog UDP server integration" {
+    const allocator = std.testing.allocator;
+    var store = try storage.LogStorage.initInMemory(allocator);
+    defer store.deinit();
+
+    // Use a high port to avoid needing root privileges
+    const test_port: u16 = 15514;
+    var server = try SyslogServer.init(allocator, test_port, &store);
+    defer server.deinit();
+
+    // Start the UDP server
+    try server.startUDP();
+
+    // Create a UDP client socket to send a message
+    const client_sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer std.posix.close(client_sock);
+
+    // Send a syslog message to the server
+    const msg = "<134>Jan 15 12:34:56 myhost myapp[1234]: Test message via UDP";
+    const server_addr = net.Address.initIp4(.{ 127, 0, 0, 1 }, test_port);
+    _ = try std.posix.sendto(client_sock, msg, 0, &server_addr.any, @sizeOf(@TypeOf(server_addr.in)));
+
+    // Give some time for the message to be received
+    std.Thread.sleep(10 * std.time.ns_per_ms);
+
+    // Receive the message
+    if (try server.receiveOne()) |entry| {
+        // Insert into storage
+        const id = try store.insert(entry);
+        try std.testing.expect(id == 1);
+
+        // Verify it was stored
+        const count = try store.getLogCount();
+        try std.testing.expect(count == 1);
+
+        // Query and verify content
+        const results = try store.queryByTimeRange(allocator, 0, std.math.maxInt(i64), 10);
+        defer {
+            for (results) |r| {
+                allocator.free(r.host);
+                allocator.free(r.message);
+                allocator.free(r.raw_data);
+                if (r.app_name) |a| allocator.free(a);
+                if (r.proc_id) |p| allocator.free(p);
+                if (r.msg_id) |m| allocator.free(m);
+            }
+            allocator.free(results);
+        }
+
+        try std.testing.expect(results.len == 1);
+        try std.testing.expectEqualStrings("myhost", results[0].host);
+        try std.testing.expectEqualStrings("Test message via UDP", results[0].message);
+        try std.testing.expect(results[0].source == .syslog);
+    } else {
+        return error.NoMessageReceived;
+    }
 }

@@ -305,7 +305,7 @@ pub const SnmpServer = struct {
 
     pub fn start(self: *SnmpServer) !void {
         const address = net.Address.initIp4(.{ 0, 0, 0, 0 }, self.port);
-        const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+        const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, 0);
         errdefer std.posix.close(sock);
 
         // Allow binding to privileged ports if running as root
@@ -374,4 +374,65 @@ test "parse ASN.1 octet string" {
     const data = [_]u8{ 0x04, 0x06, 'p', 'u', 'b', 'l', 'i', 'c' };
     const result = try parseAsn1OctetString(&data);
     try std.testing.expectEqualStrings("public", result.value);
+}
+
+test "SNMP trap to log entry and storage" {
+    const allocator = std.testing.allocator;
+    var store = try storage.LogStorage.initInMemory(allocator);
+    defer store.deinit();
+
+    // Create a minimal SNMPv2c trap packet
+    // Structure: SEQUENCE { version, community, PDU }
+    const trap_packet = [_]u8{
+        0x30, 0x26, // SEQUENCE, length 38
+        0x02, 0x01, 0x01, // INTEGER version = 1 (SNMPv2c)
+        0x04, 0x06, 'p', 'u', 'b', 'l', 'i', 'c', // OCTET STRING community = "public"
+        0xA7, 0x19, // SNMPv2-Trap PDU, length 25
+        0x02, 0x01, 0x01, // request-id
+        0x02, 0x01, 0x00, // error-status
+        0x02, 0x01, 0x00, // error-index
+        0x30, 0x0E, // varbind list
+        0x30, 0x0C, // varbind
+        0x06, 0x08, 0x2B, 0x06, 0x01, 0x02, 0x01, 0x01, 0x03, 0x00, // OID (sysUpTime)
+        0x02, 0x00, // INTEGER value
+    };
+
+    const trap = try parseSnmpTrap(allocator, &trap_packet);
+    defer allocator.free(trap.varbinds);
+
+    try std.testing.expect(trap.version == .v2c);
+    try std.testing.expectEqualStrings("public", trap.community);
+
+    // Convert to log entry and insert
+    const entry = try trap.toLogEntry(allocator);
+    defer {
+        allocator.free(entry.host);
+        allocator.free(entry.message);
+    }
+
+    const id = try store.insert(entry);
+    try std.testing.expect(id == 1);
+
+    // Verify it was stored
+    const count = try store.getLogCount();
+    try std.testing.expect(count == 1);
+
+    // Query and verify
+    const results = try store.queryByTimeRange(allocator, 0, std.math.maxInt(i64), 10);
+    defer {
+        for (results) |r| {
+            allocator.free(r.host);
+            allocator.free(r.message);
+            allocator.free(r.raw_data);
+            if (r.app_name) |a| allocator.free(a);
+            if (r.proc_id) |p| allocator.free(p);
+            if (r.msg_id) |m| allocator.free(m);
+        }
+        allocator.free(results);
+    }
+
+    try std.testing.expect(results.len == 1);
+    try std.testing.expect(results[0].source == .snmp);
+    try std.testing.expect(results[0].level == .notice);
+    try std.testing.expectEqualStrings("snmptrapd", results[0].app_name.?);
 }
