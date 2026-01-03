@@ -311,7 +311,9 @@ pub const LogStorage = struct {
         var results = std.ArrayList(LogEntry).empty;
         errdefer results.deinit(allocator);
 
+        var count: usize = 0;
         while (try result.next()) |row| {
+            count += 1;
             // Get hmac from BLOB - required field
             var hmac: [32]u8 = [_]u8{0} ** 32;
             if (try row.getBlob(11)) |blob| {
