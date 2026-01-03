@@ -10,8 +10,8 @@
 
 const std = @import("std");
 pub const sqlite = @import("sqlite.zig");
+pub const storage_sqlite = @import("storage_sqlite.zig");
 pub const storage = @import("storage.zig");
-pub const storage_zdbc = @import("storage_zdbc.zig");
 pub const syslog = @import("syslog.zig");
 pub const rest_api = @import("rest_api.zig");
 pub const snmp = @import("snmp.zig");
@@ -308,8 +308,8 @@ pub fn main() !void {
 // Run all module tests
 test {
     _ = sqlite;
+    _ = storage_sqlite;
     _ = storage;
-    _ = storage_zdbc;
     _ = syslog;
     _ = rest_api;
     _ = snmp;
