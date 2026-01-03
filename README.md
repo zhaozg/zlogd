@@ -42,41 +42,84 @@ zig build -Doptimize=ReleaseFast
 
 ### Run performance benchmark
 ```bash
-zig build bench -Doptimize=ReleaseFast
+zig build -Doptimize=ReleaseFast
+./zig-out/bin/zlogd-bench
 ```
+
+## Technical Implementation
+
+### Database Layer - zdbc Integration
+
+The storage layer uses [zdbc](https://github.com/zhaozg/zdbc) for type-safe database operations:
+
+**Key Features:**
+- **Parameterized queries**: All database operations use `zdbc.Value` for parameter binding, preventing SQL injection
+- **Transaction-based batching**: Batch inserts are wrapped in transactions for ACID guarantees and performance
+- **Connection abstraction**: Clean abstraction over SQLite with potential for other backends
+- **Prepared statement reuse**: zdbc automatically manages prepared statements for efficiency
+
+**Example batch insert with zdbc:**
+```zig
+try conn.begin();
+errdefer conn.rollback() catch {};
+
+for (entries) |entry| {
+    _ = try conn.exec(INSERT_SQL, &.{
+        zdbc.Value.initInt(entry.timestamp),
+        zdbc.Value.initText(entry.host),
+        zdbc.Value.initBlob(entry.raw_data),
+        // ... more parameters
+    });
+}
+
+try conn.commit();
+```
+
+**Performance optimizations:**
+- WAL (Write-Ahead Logging) mode enabled for concurrent writes
+- Batch size tuning for optimal throughput vs latency trade-off
+- Mutex-protected HMAC chain for secure tamper detection
+- Cached next-ID prediction to avoid extra queries
 
 ## Performance Baseline
 
-Benchmark results in ReleaseFast mode (in-memory SQLite):
+Benchmark results in ReleaseFast mode with zdbc (in-memory SQLite):
 
-### Storage Operations
+### Storage Operations (zdbc implementation)
 
-| Operation | Ops/sec | Avg Latency | Throughput |
-|-----------|---------|-------------|------------|
-| Single Insert | ~120,000 | ~8 µs | 120K entries/sec |
-| Batch Insert x10 | ~16,600 | ~60 µs | 166K entries/sec |
-| Batch Insert x100 | ~1,980 | ~505 µs | 198K entries/sec |
+| Operation | Ops/sec | Avg Latency | Effective Throughput |
+|-----------|---------|-------------|----------------------|
+| Single Insert | ~86,000 | ~11.6 µs | 86K entries/sec |
+| Batch Insert x10 | ~11,000 | ~91 µs | **110K entries/sec** |
+| Batch Insert x100 | ~1,200 | ~829 µs | **121K entries/sec** |
 
 ### Message Processing
 
 | Operation | Ops/sec | Avg Latency |
 |-----------|---------|-------------|
-| Syslog Parse | ~7,200,000 | ~0.14 µs |
-| JSON Parse | ~1,940,000 | ~0.52 µs |
+| Syslog Parse | ~9,100,000 | ~0.11 µs |
+| JSON Parse | ~2,300,000 | ~0.44 µs |
 
 ### Full Pipeline (Parse + Insert)
 
 | Operation | Ops/sec | Avg Latency |
 |-----------|---------|-------------|
-| Syslog Full Pipeline | ~101,000 | ~9.9 µs |
-| JSON Full Pipeline | ~100,000 | ~10.0 µs |
+| Syslog Full Pipeline | ~76,800 | ~13.0 µs |
+| JSON Full Pipeline | ~76,300 | ~13.1 µs |
 
 **Key observations:**
-- Single inserts: High ops/sec but lower total throughput
-- Batch x100: Best effective throughput at ~198K entries/second
-- Batching provides significant throughput improvements
-- Message parsing is extremely fast (~7M syslog / ~2M JSON ops/sec)
+- **Batch x100 provides best throughput**: 121K entries/second effective rate
+- Batching provides significant throughput improvements (40% boost over single inserts)
+- Message parsing is extremely fast (~9M syslog / ~2M JSON ops/sec)
 - Full pipeline throughput limited by storage, not parsing
+- Using **zdbc with parameterized queries and transactions** for safety and performance
+
+**Performance optimization notes:**
+- Transaction-wrapped batch inserts provide optimal throughput
+- HMAC chain computation adds security with minimal overhead (~1-2 µs per entry)
+- WAL mode enabled for better concurrent write performance
+- Parameterized queries prevent SQL injection while maintaining speed
+
 
 ## Usage
 
