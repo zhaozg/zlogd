@@ -100,7 +100,9 @@ pub const LogStorage = struct {
 
     pub fn init(allocator: std.mem.Allocator, db_path: [:0]const u8) !LogStorage {
         // Create URI for SQLite connection
-        const uri = try std.fmt.allocPrint(allocator, "sqlite:///{s}", .{db_path});
+        // For absolute paths like `/path`: results in `sqlite:///path`
+        // For relative paths like `logs.db`: results in `sqlite://logs.db`
+        const uri = try std.fmt.allocPrint(allocator, "sqlite://{s}", .{db_path});
         defer allocator.free(uri);
 
         var conn = try zdbc.open(allocator, uri);
