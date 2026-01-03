@@ -6,6 +6,10 @@
             .url = "git+https://github.com/karlseguin/http.zig?ref=master#a4477b1dbdc5b820fd4ad301797ca6399f7eb6e4",
             .hash = "httpz-0.0.0-PNVzrBgtBwCVkSJyophIX6WHwDR0r8XhBGQr96Kk-1El",
         },
+        .zdbc = .{
+            .url = "git+https://github.com/zhaozg/zdbc?ref=main#33bec9d9644502431bfa09fa03a6b8ec636f18b0",
+            .hash = "zdbc-0.1.0-_uIxviBFAgA-xCgi3Z7-iodGtTCO4H1xgWISOT4NHG2C",
+        },
     },
     .minimum_zig_version = "0.15.0",
     .fingerprint = 0x275893f4575d37f7,

@@ -11,6 +11,7 @@
 const std = @import("std");
 pub const sqlite = @import("sqlite.zig");
 pub const storage = @import("storage.zig");
+pub const storage_zdbc = @import("storage_zdbc.zig");
 pub const syslog = @import("syslog.zig");
 pub const rest_api = @import("rest_api.zig");
 pub const snmp = @import("snmp.zig");
@@ -308,6 +309,7 @@ pub fn main() !void {
 test {
     _ = sqlite;
     _ = storage;
+    _ = storage_zdbc;
     _ = syslog;
     _ = rest_api;
     _ = snmp;
