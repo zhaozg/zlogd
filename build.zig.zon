@@ -7,8 +7,8 @@
             .hash = "httpz-0.0.0-PNVzrBgtBwCVkSJyophIX6WHwDR0r8XhBGQr96Kk-1El",
         },
         .zdbc = .{
-            .url = "git+https://github.com/zhaozg/zdbc?ref=main#33bec9d9644502431bfa09fa03a6b8ec636f18b0",
-            .hash = "zdbc-0.1.0-_uIxviBFAgA-xCgi3Z7-iodGtTCO4H1xgWISOT4NHG2C",
+            .url = "git+https://github.com/zhaozg/zdbc?ref=main#bc3a2814bfc8f2bf2f407ca02a1bd790f1df3dde",
+            .hash = "zdbc-0.1.0-_uIxvkp9AgDfimz0dPA29F7YXjhqUqHAEanpZrkaHa91",
         },
     },
     .minimum_zig_version = "0.15.0",
