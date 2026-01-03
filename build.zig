@@ -10,6 +10,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Get zdbc dependency
+    const zdbc = b.dependency("zdbc", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Main executable
     const exe = b.addExecutable(.{
         .name = "zlogd",
@@ -20,6 +26,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "httpz", .module = httpz.module("httpz") },
+                .{ .name = "zdbc", .module = zdbc.module("zdbc") },
             },
         }),
     });
@@ -47,6 +54,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "httpz", .module = httpz.module("httpz") },
+                .{ .name = "zdbc", .module = zdbc.module("zdbc") },
             },
         }),
     });
@@ -64,6 +72,9 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .imports = &.{
+                .{ .name = "zdbc", .module = zdbc.module("zdbc") },
+            },
         }),
     });
     bench_exe.linkSystemLibrary("sqlite3");

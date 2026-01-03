@@ -1,8 +1,8 @@
-//! Log Storage Module
-//! Handles database schema and log insertion
+//! Log Storage Module using ZDBC
+//! Handles database schema and log insertion using zdbc library
 
 const std = @import("std");
-const sqlite = @import("sqlite.zig");
+const zdbc = @import("zdbc");
 
 pub const LogLevel = enum(u8) {
     emergency = 0,
@@ -63,11 +63,11 @@ pub const LogEntry = struct {
 };
 
 pub const LogStorage = struct {
-    db: sqlite.Database,
-    insert_stmt: ?sqlite.Statement = null,
+    conn: zdbc.Connection,
     allocator: std.mem.Allocator,
     prev_hmac: [32]u8 = [_]u8{0} ** 32, // Chain HMAC state
     next_id: i64 = 1, // Cached next expected ID for performance
+    mutex: std.Thread.Mutex = .{}, // Protect HMAC chain state
 
     const SCHEMA =
         \\CREATE TABLE IF NOT EXISTS logs (
@@ -98,26 +98,34 @@ pub const LogStorage = struct {
         \\VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ;
 
-    pub fn init(allocator: std.mem.Allocator, db_path: [*:0]const u8) !LogStorage {
-        var db = try sqlite.Database.open(db_path);
-        errdefer db.close();
+    pub fn init(allocator: std.mem.Allocator, db_path: [:0]const u8) !LogStorage {
+        // Create URI for SQLite connection
+        const uri = try std.fmt.allocPrint(allocator, "sqlite:///{s}", .{db_path});
+        defer allocator.free(uri);
+
+        var conn = try zdbc.open(allocator, uri);
+        errdefer conn.close();
 
         // Enable WAL mode for better concurrent performance
-        try db.enableWAL();
-        try db.setSynchronous(.normal);
-        try db.setBusyTimeout(5000);
+        _ = try conn.exec("PRAGMA journal_mode=WAL", &.{});
+        _ = try conn.exec("PRAGMA synchronous=NORMAL", &.{});
+        _ = try conn.exec("PRAGMA busy_timeout=5000", &.{});
 
         // Create schema
-        try db.exec(SCHEMA);
+        _ = try conn.exec(SCHEMA, &.{});
 
         // Load the last HMAC and next_id from existing records for chain continuation
         var prev_hmac: [32]u8 = [_]u8{0} ** 32;
         var next_id: i64 = 1;
-        var stmt = try db.prepare("SELECT id, hmac FROM logs ORDER BY id DESC LIMIT 1");
-        defer stmt.finalize();
-        if (try stmt.step()) {
-            next_id = stmt.columnInt(0) + 1;
-            if (stmt.columnBlob(1)) |blob| {
+
+        var result = try conn.query("SELECT id, hmac FROM logs ORDER BY id DESC LIMIT 1", &.{});
+        defer result.deinit();
+
+        if (try result.next()) |row| {
+            if (try row.getInt(0)) |id| {
+                next_id = id + 1;
+            }
+            if (try row.getBlob(1)) |blob| {
                 if (blob.len == 32) {
                     @memcpy(&prev_hmac, blob);
                 }
@@ -125,7 +133,7 @@ pub const LogStorage = struct {
         }
 
         return LogStorage{
-            .db = db,
+            .conn = conn,
             .allocator = allocator,
             .prev_hmac = prev_hmac,
             .next_id = next_id,
@@ -133,15 +141,14 @@ pub const LogStorage = struct {
     }
 
     pub fn initInMemory(allocator: std.mem.Allocator) !LogStorage {
-        var db = try sqlite.Database.openInMemory();
-        errdefer db.close();
+        var conn = try zdbc.open(allocator, "sqlite://:memory:");
+        errdefer conn.close();
 
-        try db.exec(SCHEMA);
+        // Create schema
+        _ = try conn.exec(SCHEMA, &.{});
 
-        // For in-memory database, prev_hmac is initialized to zeros
-        // (new empty database has no previous HMAC)
         return LogStorage{
-            .db = db,
+            .conn = conn,
             .allocator = allocator,
             .prev_hmac = [_]u8{0} ** 32,
             .next_id = 1,
@@ -149,17 +156,7 @@ pub const LogStorage = struct {
     }
 
     pub fn deinit(self: *LogStorage) void {
-        if (self.insert_stmt) |*stmt| {
-            stmt.finalize();
-        }
-        self.db.close();
-    }
-
-    fn getInsertStmt(self: *LogStorage) !*sqlite.Statement {
-        if (self.insert_stmt == null) {
-            self.insert_stmt = try self.db.prepare(INSERT_SQL);
-        }
-        return &self.insert_stmt.?;
+        self.conn.close();
     }
 
     /// Compute chain HMAC: current_value = hash(raw_data || id) XOR previous_value
@@ -186,67 +183,40 @@ pub const LogStorage = struct {
     }
 
     pub fn insert(self: *LogStorage, entry: LogEntry) !i64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         // Use cached next_id for performance (no database query needed)
         const expected_id = self.next_id;
 
         // Compute chain HMAC using the expected ID
         const hmac = self.computeChainHmac(entry.raw_data, expected_id);
 
-        var stmt = try self.getInsertStmt();
-        defer {
-            stmt.reset() catch {};
-            stmt.clearBindings() catch {};
-        }
+        // Use parameterized INSERT with zdbc.Value for safety and performance
+        _ = try self.conn.exec(INSERT_SQL, &.{
+            zdbc.Value.initInt(entry.timestamp),
+            zdbc.Value.initInt(@as(i64, @intFromEnum(entry.level))),
+            zdbc.Value.initInt(@as(i64, @intFromEnum(entry.source))),
+            zdbc.Value.initText(entry.host),
+            if (entry.facility) |f| zdbc.Value.initInt(@as(i64, f)) else zdbc.Value.initNull(),
+            if (entry.app_name) |app| zdbc.Value.initText(app) else zdbc.Value.initNull(),
+            if (entry.proc_id) |pid| zdbc.Value.initText(pid) else zdbc.Value.initNull(),
+            if (entry.msg_id) |mid| zdbc.Value.initText(mid) else zdbc.Value.initNull(),
+            zdbc.Value.initText(entry.message),
+            zdbc.Value.initBlob(entry.raw_data),
+            zdbc.Value.initBlob(&hmac),
+        });
 
-        try stmt.bind(1, entry.timestamp);
-        try stmt.bind(2, @as(i64, @intFromEnum(entry.level)));
-        try stmt.bind(3, @as(i64, @intFromEnum(entry.source)));
-        try stmt.bind(4, entry.host);
-
-        if (entry.facility) |f| {
-            try stmt.bind(5, @as(i64, f));
-        } else {
-            try stmt.bind(5, null);
-        }
-
-        if (entry.app_name) |app| {
-            try stmt.bind(6, app);
-        } else {
-            try stmt.bind(6, null);
-        }
-
-        if (entry.proc_id) |pid| {
-            try stmt.bind(7, pid);
-        } else {
-            try stmt.bind(7, null);
-        }
-
-        if (entry.msg_id) |mid| {
-            try stmt.bind(8, mid);
-        } else {
-            try stmt.bind(8, null);
-        }
-
-        try stmt.bind(9, entry.message);
-
-        // Bind raw_data as BLOB (required field)
-        try stmt.bindBlob(10, entry.raw_data);
-
-        // Bind computed HMAC as BLOB (required field)
-        try stmt.bindBlob(11, &hmac);
-
-        _ = try stmt.step();
-        const actual_id = self.db.lastInsertRowId();
+        const actual_id = self.conn.lastInsertId() orelse expected_id;
 
         // Verify ID matches expected (should always match with AUTOINCREMENT)
         if (actual_id != expected_id) {
             // If IDs don't match (rare edge case), update HMAC with correct ID
             const correct_hmac = self.computeChainHmac(entry.raw_data, actual_id);
-            var update_stmt = try self.db.prepare("UPDATE logs SET hmac = ? WHERE id = ?");
-            defer update_stmt.finalize();
-            try update_stmt.bindBlob(1, &correct_hmac);
-            try update_stmt.bind(2, actual_id);
-            _ = try update_stmt.step();
+            _ = try self.conn.exec("UPDATE logs SET hmac = ? WHERE id = ?", &.{
+                zdbc.Value.initBlob(&correct_hmac),
+                zdbc.Value.initInt(actual_id),
+            });
             self.prev_hmac = correct_hmac;
             // Reset next_id to actual_id + 1 to recover from mismatch
             self.next_id = actual_id + 1;
@@ -260,61 +230,110 @@ pub const LogStorage = struct {
     }
 
     pub fn insertBatch(self: *LogStorage, entries: []const LogEntry) !usize {
-        try self.db.beginTransaction();
-        errdefer self.db.rollback() catch {};
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Use transaction for batch insert (as per zdbc example)
+        try self.conn.begin();
+        errdefer self.conn.rollback() catch {};
 
         var count: usize = 0;
         for (entries) |entry| {
-            _ = try self.insert(entry);
+            // Use cached next_id for performance
+            const expected_id = self.next_id;
+
+            // Compute chain HMAC using the expected ID
+            const hmac = self.computeChainHmac(entry.raw_data, expected_id);
+
+            // Use parameterized INSERT with zdbc.Value
+            _ = try self.conn.exec(INSERT_SQL, &.{
+                zdbc.Value.initInt(entry.timestamp),
+                zdbc.Value.initInt(@as(i64, @intFromEnum(entry.level))),
+                zdbc.Value.initInt(@as(i64, @intFromEnum(entry.source))),
+                zdbc.Value.initText(entry.host),
+                if (entry.facility) |f| zdbc.Value.initInt(@as(i64, f)) else zdbc.Value.initNull(),
+                if (entry.app_name) |app| zdbc.Value.initText(app) else zdbc.Value.initNull(),
+                if (entry.proc_id) |pid| zdbc.Value.initText(pid) else zdbc.Value.initNull(),
+                if (entry.msg_id) |mid| zdbc.Value.initText(mid) else zdbc.Value.initNull(),
+                zdbc.Value.initText(entry.message),
+                zdbc.Value.initBlob(entry.raw_data),
+                zdbc.Value.initBlob(&hmac),
+            });
+
+            const actual_id = self.conn.lastInsertId() orelse expected_id;
+
+            // Verify ID matches expected
+            if (actual_id != expected_id) {
+                // If IDs don't match, update HMAC with correct ID
+                const correct_hmac = self.computeChainHmac(entry.raw_data, actual_id);
+                _ = try self.conn.exec("UPDATE logs SET hmac = ? WHERE id = ?", &.{
+                    zdbc.Value.initBlob(&correct_hmac),
+                    zdbc.Value.initInt(actual_id),
+                });
+                self.prev_hmac = correct_hmac;
+                self.next_id = actual_id + 1;
+            } else {
+                // Update previous HMAC and next_id for chain continuity
+                self.prev_hmac = hmac;
+                self.next_id = expected_id + 1;
+            }
+
             count += 1;
         }
 
-        try self.db.commit();
+        try self.conn.commit();
         return count;
     }
 
     pub fn getLogCount(self: *LogStorage) !i64 {
-        var stmt = try self.db.prepare("SELECT COUNT(*) FROM logs");
-        defer stmt.finalize();
+        var result = try self.conn.query("SELECT COUNT(*) FROM logs", &.{});
+        defer result.deinit();
 
-        _ = try stmt.step();
-        return stmt.columnInt(0);
+        if (try result.next()) |row| {
+            if (try row.getInt(0)) |count| {
+                return count;
+            }
+        }
+        return 0;
     }
 
     pub fn queryByTimeRange(self: *LogStorage, allocator: std.mem.Allocator, start: i64, end: i64, limit: u32) ![]LogEntry {
-        var stmt = try self.db.prepare(
+        var result = try self.conn.query(
             "SELECT id, timestamp, level, source, host, facility, app_name, proc_id, msg_id, message, raw_data, hmac FROM logs WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp DESC LIMIT ?",
+            &.{
+                zdbc.Value.initInt(start),
+                zdbc.Value.initInt(end),
+                zdbc.Value.initInt(@as(i64, limit)),
+            },
         );
-        defer stmt.finalize();
-
-        try stmt.bind(1, start);
-        try stmt.bind(2, end);
-        try stmt.bind(3, @as(i64, limit));
+        defer result.deinit();
 
         var results = std.ArrayList(LogEntry).empty;
         errdefer results.deinit(allocator);
 
-        while (try stmt.step()) {
+        var count: usize = 0;
+        while (try result.next()) |row| {
+            count += 1;
             // Get hmac from BLOB - required field
             var hmac: [32]u8 = [_]u8{0} ** 32;
-            if (stmt.columnBlob(11)) |blob| {
+            if (try row.getBlob(11)) |blob| {
                 if (blob.len == 32) {
                     @memcpy(&hmac, blob);
                 }
             }
 
             const entry = LogEntry{
-                .id = stmt.columnInt(0),
-                .timestamp = stmt.columnInt(1),
-                .level = @enumFromInt(@as(u8, @intCast(stmt.columnInt(2)))),
-                .source = @enumFromInt(@as(u8, @intCast(stmt.columnInt(3)))),
-                .host = if (stmt.columnText(4)) |h| try allocator.dupe(u8, h) else "",
-                .facility = if (stmt.columnInt(5) != 0) @as(u8, @intCast(stmt.columnInt(5))) else null,
-                .app_name = if (stmt.columnText(6)) |a| try allocator.dupe(u8, a) else null,
-                .proc_id = if (stmt.columnText(7)) |p| try allocator.dupe(u8, p) else null,
-                .msg_id = if (stmt.columnText(8)) |m| try allocator.dupe(u8, m) else null,
-                .message = if (stmt.columnText(9)) |msg| try allocator.dupe(u8, msg) else "",
-                .raw_data = if (stmt.columnBlob(10)) |r| try allocator.dupe(u8, r) else "",
+                .id = try row.getInt(0),
+                .timestamp = (try row.getInt(1)) orelse 0,
+                .level = @enumFromInt(@as(u8, @intCast((try row.getInt(2)) orelse 0))),
+                .source = @enumFromInt(@as(u8, @intCast((try row.getInt(3)) orelse 0))),
+                .host = if (try row.getText(4)) |h| try allocator.dupe(u8, h) else "",
+                .facility = if ((try row.getInt(5)) orelse 0 != 0) @as(u8, @intCast((try row.getInt(5)) orelse 0)) else null,
+                .app_name = if (try row.getText(6)) |a| try allocator.dupe(u8, a) else null,
+                .proc_id = if (try row.getText(7)) |p| try allocator.dupe(u8, p) else null,
+                .msg_id = if (try row.getText(8)) |m| try allocator.dupe(u8, m) else null,
+                .message = if (try row.getText(9)) |msg| try allocator.dupe(u8, msg) else "",
+                .raw_data = if (try row.getBlob(10)) |r| try allocator.dupe(u8, r) else "",
                 .hmac = hmac,
             };
             try results.append(allocator, entry);
